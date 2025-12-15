@@ -1,0 +1,19 @@
+:root {
+  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
+    sans-serif;
+  line-height: 1.4;
+  font-weight: 400;
+  color: #111827;
+  background: #ffffff;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  margin: 0;
+  min-width: 820px;
+  min-height: 540px;
+}
+
+button {
+  font-family: inherit;
+}
