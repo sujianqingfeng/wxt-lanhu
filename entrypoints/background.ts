@@ -1,6 +1,7 @@
 type LoadFromPageUrlMessage = {
   type: 'lanhu.loadFromPageUrl';
   pageUrl: string;
+  force?: boolean;
 };
 
 type LoadFromJsonUrlMessage = {
@@ -8,9 +9,26 @@ type LoadFromJsonUrlMessage = {
   jsonUrl: string;
 };
 
-type LanhuMessage = LoadFromPageUrlMessage | LoadFromJsonUrlMessage;
+type GetCachedFromPageUrlMessage = {
+  type: 'lanhu.getCachedFromPageUrl';
+  pageUrl: string;
+};
 
-type LanhuOk<T> = { ok: true; data: T };
+type ClearCacheMessage = {
+  type: 'lanhu.clearCache';
+};
+
+type LanhuMessage =
+  | LoadFromPageUrlMessage
+  | LoadFromJsonUrlMessage
+  | GetCachedFromPageUrlMessage
+  | ClearCacheMessage;
+
+type LanhuOk<T> = {
+  ok: true;
+  data: T;
+  meta?: { cached: boolean; fetchedAt: number; jsonUrl?: string };
+};
 type LanhuErr = { ok: false; error: string };
 
 type LanhuProjectImageResponse = {
@@ -42,7 +60,23 @@ export default defineBackground(() => {
 
     if (message.type === 'lanhu.loadFromPageUrl') {
       void (async () => {
-        const result = await handleLoadFromPageUrl(message.pageUrl);
+        const result = await handleLoadFromPageUrl(message.pageUrl, !!message.force);
+        sendResponse(result);
+      })();
+      return true;
+    }
+
+    if (message.type === 'lanhu.getCachedFromPageUrl') {
+      void (async () => {
+        const result = await handleGetCachedFromPageUrl(message.pageUrl);
+        sendResponse(result);
+      })();
+      return true;
+    }
+
+    if (message.type === 'lanhu.clearCache') {
+      void (async () => {
+        const result = await handleClearCache();
         sendResponse(result);
       })();
       return true;
@@ -50,7 +84,21 @@ export default defineBackground(() => {
   });
 });
 
-async function handleLoadFromPageUrl(pageUrl: string): Promise<LanhuOk<unknown> | LanhuErr> {
+type CacheKeyParams = { project_id: string; image_id: string };
+type CacheEntry = {
+  fetchedAt: number;
+  project_id: string;
+  image_id: string;
+  jsonUrl: string;
+  data: unknown;
+};
+
+const memoryCache = new Map<string, CacheEntry>();
+
+async function handleLoadFromPageUrl(
+  pageUrl: string,
+  force: boolean,
+): Promise<LanhuOk<unknown> | LanhuErr> {
   try {
     const cleanedUrl = pageUrl.replace(/\s+/g, '');
     log('loadFromPageUrl', cleanedUrl);
@@ -60,6 +108,22 @@ async function handleLoadFromPageUrl(pageUrl: string): Promise<LanhuOk<unknown> 
       return { ok: false, error: '无法从页面链接解析出 project_id / image_id' };
     }
     log('parsed params', params);
+
+    const key = getCacheKey(params);
+    if (!force) {
+      const cached = await readCache(key);
+      if (cached) {
+        log('cache hit', { key, fetchedAt: cached.fetchedAt, jsonUrl: cached.jsonUrl });
+        return {
+          ok: true,
+          data: cached.data,
+          meta: { cached: true, fetchedAt: cached.fetchedAt, jsonUrl: cached.jsonUrl },
+        };
+      }
+      log('cache miss', key);
+    } else {
+      log('force refresh', key);
+    }
 
     const apiUrlWithTeam = new URL('https://lanhuapp.com/api/project/image');
     apiUrlWithTeam.searchParams.set('dds_status', '1');
@@ -116,7 +180,18 @@ async function handleLoadFromPageUrl(pageUrl: string): Promise<LanhuOk<unknown> 
       }
 
       log('picked json_url', jsonUrl);
-      return await handleLoadFromJsonUrl(jsonUrl);
+      const sketchRes = await handleLoadFromJsonUrl(jsonUrl);
+      if (!sketchRes.ok) return sketchRes;
+
+      const entry: CacheEntry = {
+        fetchedAt: Date.now(),
+        project_id: params.project_id,
+        image_id: params.image_id,
+        jsonUrl,
+        data: sketchRes.data,
+      };
+      await writeCache(key, entry);
+      return { ok: true, data: sketchRes.data, meta: { cached: false, fetchedAt: entry.fetchedAt, jsonUrl } };
     }
 
     return { ok: false, error: lastError };
@@ -145,6 +220,37 @@ async function handleLoadFromJsonUrl(jsonUrl: string): Promise<LanhuOk<unknown> 
     return { ok: true, data };
   } catch (error) {
     log('loadFromJsonUrl error', error);
+    return { ok: false, error: getErrorMessage(error) };
+  }
+}
+
+async function handleGetCachedFromPageUrl(pageUrl: string): Promise<LanhuOk<unknown> | LanhuErr> {
+  try {
+    const cleanedUrl = pageUrl.replace(/\s+/g, '');
+    const params = parseLanhuPageUrl(cleanedUrl);
+    if (!params) return { ok: false, error: '无法从页面链接解析出 project_id / image_id' };
+    const key = getCacheKey(params);
+    const cached = await readCache(key);
+    if (!cached) return { ok: false, error: 'no-cache' };
+    return { ok: true, data: cached.data, meta: { cached: true, fetchedAt: cached.fetchedAt, jsonUrl: cached.jsonUrl } };
+  } catch (error) {
+    return { ok: false, error: getErrorMessage(error) };
+  }
+}
+
+async function handleClearCache(): Promise<LanhuOk<{ cleared: number }> | LanhuErr> {
+  try {
+    const cleared = memoryCache.size;
+    memoryCache.clear();
+    // Remove all entries by previously tracked keys (best-effort).
+    const keys = await browser.storage.local.get('lanhu:cacheKeys');
+    const list = Array.isArray((keys as any)['lanhu:cacheKeys'])
+      ? ((keys as any)['lanhu:cacheKeys'] as string[])
+      : [];
+    if (list.length) await browser.storage.local.remove(list);
+    await browser.storage.local.remove('lanhu:cacheKeys');
+    return { ok: true, data: { cleared } };
+  } catch (error) {
     return { ok: false, error: getErrorMessage(error) };
   }
 }
@@ -191,4 +297,45 @@ function log(message: string, extra?: unknown) {
   // MV3 service worker log: chrome://extensions -> 本扩展 -> Service worker -> Inspect
   if (extra === undefined) console.log(`[lanhu] ${message}`);
   else console.log(`[lanhu] ${message}`, extra);
+}
+
+function getCacheKey(params: CacheKeyParams): string {
+  return `lanhu:cache:${params.project_id}:${params.image_id}`;
+}
+
+async function readCache(key: string): Promise<CacheEntry | null> {
+  const mem = memoryCache.get(key);
+  if (mem) return mem;
+  const stored = await browser.storage.local.get(key);
+  const entry = (stored as any)[key] as CacheEntry | undefined;
+  if (!entry) return null;
+  memoryCache.set(key, entry);
+  return entry;
+}
+
+async function writeCache(key: string, entry: CacheEntry): Promise<void> {
+  memoryCache.set(key, entry);
+  // Best-effort persistent cache. Skip if too large.
+  try {
+    const bytes = new TextEncoder().encode(JSON.stringify(entry.data)).byteLength;
+    if (bytes > 4_500_000) {
+      log('skip persist cache (too large)', { key, bytes });
+      return;
+    }
+    await browser.storage.local.set({ [key]: entry });
+    await rememberCacheKey(key);
+    log('cache persisted', { key, bytes });
+  } catch (e) {
+    log('cache persist failed', e);
+  }
+}
+
+async function rememberCacheKey(key: string): Promise<void> {
+  const existing = await browser.storage.local.get('lanhu:cacheKeys');
+  const list = Array.isArray((existing as any)['lanhu:cacheKeys'])
+    ? ((existing as any)['lanhu:cacheKeys'] as string[])
+    : [];
+  if (list.includes(key)) return;
+  list.push(key);
+  await browser.storage.local.set({ 'lanhu:cacheKeys': list });
 }

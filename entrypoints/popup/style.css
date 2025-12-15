@@ -8,10 +8,25 @@
   -webkit-font-smoothing: antialiased;
 }
 
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+}
+
 body {
   margin: 0;
-  min-width: 820px;
-  min-height: 540px;
+  /* Chrome extension popup has a max size; keep below to avoid outer scrollbars. */
+  width: 780px;
+  height: 580px;
+  overflow: hidden;
 }
 
 button {

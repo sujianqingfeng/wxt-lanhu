@@ -134,7 +134,39 @@ export function pickExportNode(node: LanhuLayerNode): Record<string, unknown> {
     realFrame: node.realFrame ?? null,
     combinedFrame: node.combinedFrame ?? null,
     transform: node.transform ?? null,
+    opacity: node.opacity ?? null,
+    visible: node.visible ?? null,
+    rotation: node.rotation ?? null,
+    clipped: node.clipped ?? null,
+    isMask: node.isMask ?? null,
+    origin: node.origin ?? null,
+    radius: node.radius ?? null,
+    style: node.style ?? null,
+    paths: node.paths ?? null,
+    text: node.text ?? null,
+    image: node.image ?? null,
+    sharedStyle: node.sharedStyle ?? null,
   };
+}
+
+export function compactJson(value: unknown): unknown {
+  if (value == null) return undefined;
+  if (Array.isArray(value)) {
+    const next = value
+      .map((v) => compactJson(v))
+      .filter((v) => v !== undefined);
+    return next.length ? next : undefined;
+  }
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    const next: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      const cv = compactJson(v);
+      if (cv !== undefined) next[k] = cv;
+    }
+    return Object.keys(next).length ? next : undefined;
+  }
+  return value;
 }
 
 function isFiniteNumber(value: unknown): value is number {

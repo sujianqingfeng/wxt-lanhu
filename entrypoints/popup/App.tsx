@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   getAncestorIds,
   getDescendantIds,
@@ -6,6 +6,7 @@ import {
   getNodeRect,
   parseLanhuTree,
   pickExportNode,
+  compactJson,
   type LanhuRect,
   type LanhuSketchJson,
   type LanhuTree,
@@ -13,14 +14,16 @@ import {
 import './App.css';
 
 type LoadResult =
-  | { ok: true; data: unknown }
+  | { ok: true; data: unknown; meta?: { cached: boolean; fetchedAt: number; jsonUrl?: string } }
   | { ok: false; error: string };
 
 function App() {
   const [pageUrl, setPageUrl] = useState('');
-  const [jsonUrl, setJsonUrl] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadMeta, setLoadMeta] = useState<{ cached: boolean; fetchedAt: number; jsonUrl?: string } | null>(
+    null,
+  );
 
   const [raw, setRaw] = useState<LanhuSketchJson | null>(null);
   const [tree, setTree] = useState<LanhuTree | null>(null);
@@ -30,6 +33,7 @@ function App() {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [exportText, setExportText] = useState('');
   const [view, setView] = useState<'tree' | 'wireframe'>('tree');
+  const [compactExport, setCompactExport] = useState(true);
 
   useEffect(() => {
     let canceled = false;
@@ -49,6 +53,25 @@ function App() {
       canceled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!pageUrl) return;
+    if (!pageUrl.startsWith('https://lanhuapp.com/web/')) return;
+    void (async () => {
+      try {
+        const res = (await browser.runtime.sendMessage({
+          type: 'lanhu.getCachedFromPageUrl',
+          pageUrl,
+        })) as LoadResult;
+        if (res?.ok) {
+          setLoadMeta(res.meta ?? null);
+          applySketchJson(res.data);
+        }
+      } catch {
+        // ignore cache read errors
+      }
+    })();
+  }, [pageUrl]);
 
   const rectIndex = useMemo(() => {
     if (!tree) return null;
@@ -121,19 +144,21 @@ function App() {
     return keep;
   }, [tree, search]);
 
-  async function loadByPageUrl(urlOverride?: string) {
+  async function loadByPageUrl(force: boolean) {
     setLoading(true);
     setError(null);
     setExportText('');
     try {
-      const finalUrl = (urlOverride ?? pageUrl).trim();
+      const finalUrl = pageUrl.trim();
       if (!finalUrl) throw new Error('页面链接为空');
 
       const res = (await browser.runtime.sendMessage({
         type: 'lanhu.loadFromPageUrl',
         pageUrl: finalUrl,
+        force,
       })) as LoadResult;
       if (!res?.ok) throw new Error(res?.error || '加载失败');
+      setLoadMeta(res.meta ?? null);
       applySketchJson(res.data);
     } catch (e) {
       setError(getErrorMessage(e));
@@ -142,36 +167,12 @@ function App() {
     }
   }
 
-  async function loadByJsonUrl() {
-    setLoading(true);
-    setError(null);
-    setExportText('');
+  async function clearCache() {
     try {
-      const res = (await browser.runtime.sendMessage({
-        type: 'lanhu.loadFromJsonUrl',
-        jsonUrl,
-      })) as LoadResult;
-      if (!res?.ok) throw new Error(res?.error || '加载失败');
-      applySketchJson(res.data);
+      await browser.runtime.sendMessage({ type: 'lanhu.clearCache' });
+      setLoadMeta(null);
     } catch (e) {
-      setError(getErrorMessage(e));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function loadFromFile(file: File) {
-    setLoading(true);
-    setError(null);
-    setExportText('');
-    try {
-      const text = await file.text();
-      const data = JSON.parse(text) as unknown;
-      applySketchJson(data);
-    } catch (e) {
-      setError(`读取文件失败：${getErrorMessage(e)}`);
-    } finally {
-      setLoading(false);
+      setError(`清除缓存失败：${getErrorMessage(e)}`);
     }
   }
 
@@ -205,7 +206,8 @@ function App() {
       parentById,
       nodes,
     };
-    setExportText(JSON.stringify(payload, null, 2));
+    const out = compactExport ? (compactJson(payload) ?? payload) : payload;
+    setExportText(JSON.stringify(out, null, 2));
   }
 
   async function copyExport() {
@@ -224,101 +226,94 @@ function App() {
   const selectedDescCount =
     selectedId && tree ? getDescendantIds(tree, selectedId, false).length : 0;
 
+  const headerHint = useMemo(() => {
+    if (!raw) return '';
+    const nodeCount = tree ? Object.keys(tree.nodesById).length : 0;
+    const parts = [`已加载节点：${nodeCount}`];
+    if (loadMeta) {
+      parts.push(loadMeta.cached ? '来自缓存' : '最新请求');
+      parts.push(new Date(loadMeta.fetchedAt).toLocaleString());
+    }
+    return parts.join(' · ');
+  }, [raw, tree, loadMeta]);
+
   return (
     <div className="app">
       <header className="header">
-        <div className="title">Lanhu Layer Tree</div>
-        <div className="subtitle">方案 A：树搜索 / 路径选择</div>
+        <div className="headerLeft">
+          <div className="title">Lanhu Layer Tree</div>
+          {headerHint ? (
+            <div className="headerHint" title={headerHint}>
+              {headerHint}
+            </div>
+          ) : null}
+        </div>
+
+        <div className="headerRight">
+          <div className="seg">
+            <button
+              className={`segBtn ${view === 'wireframe' ? 'active' : ''}`}
+              onClick={() => setView('wireframe')}
+              disabled={!tree}
+              title="线框图"
+            >
+              线框图
+            </button>
+            <button
+              className={`segBtn ${view === 'tree' ? 'active' : ''}`}
+              onClick={() => setView('tree')}
+              disabled={!tree}
+              title="树"
+            >
+              树
+            </button>
+          </div>
+
+          <IconButton
+            title="加载（优先使用缓存）"
+            ariaLabel="加载"
+            disabled={loading || !pageUrl.startsWith('https://lanhuapp.com/web/')}
+            onClick={() => loadByPageUrl(false)}
+          >
+            <IconDownload />
+          </IconButton>
+          <IconButton
+            title="刷新（忽略缓存，重新请求）"
+            ariaLabel="刷新"
+            disabled={loading || !pageUrl.startsWith('https://lanhuapp.com/web/')}
+            onClick={() => loadByPageUrl(true)}
+          >
+            <IconRefresh />
+          </IconButton>
+          <IconButton
+            title="清除缓存"
+            ariaLabel="清除缓存"
+            disabled={loading}
+            onClick={clearCache}
+          >
+            <IconTrash />
+          </IconButton>
+        </div>
       </header>
 
-      <section className="section">
-        <div className="row">
-          <label className="label">蓝湖页面链接</label>
-          <input
-            className="input"
-            value={pageUrl}
-            onChange={(e) => setPageUrl(e.target.value)}
-            placeholder="https://lanhuapp.com/web/#/item/project/detailDetach?...&image_id=..."
-          />
-          <button
-            className="btn"
-            disabled={loading || !pageUrl.trim()}
-            onClick={() => loadByPageUrl()}
-          >
-            解析并加载
-          </button>
-        </div>
-
-        <div className="row">
-          <label className="label">json_url</label>
-          <input
-            className="input"
-            value={jsonUrl}
-            onChange={(e) => setJsonUrl(e.target.value)}
-            placeholder="https://alipic.lanhuapp.com/SketchJSON..."
-          />
-          <button className="btn" disabled={loading || !jsonUrl.trim()} onClick={loadByJsonUrl}>
-            加载
-          </button>
-          <label className="btn" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-            <input
-              type="file"
-              accept="application/json"
-              style={{ display: 'none' }}
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) loadFromFile(file);
-                e.currentTarget.value = '';
-              }}
-            />
-            导入文件…
-          </label>
-        </div>
-
+      <div className="topNotes">
         {error ? <div className="error">{error}</div> : null}
         {loading ? <div className="hint">加载中…（需要你已在浏览器登录蓝湖）</div> : null}
-        {raw ? (
-          <div className="hint">
-            已加载节点：{tree ? Object.keys(tree.nodesById).length : 0}
-          </div>
-        ) : (
-          <div className="hint">先加载 SketchJSON，然后在下面树里选中一个节点导出。</div>
-        )}
-      </section>
+        {!raw ? <div className="hint">点击右上角“加载”开始。</div> : null}
+      </div>
 
       <section className="section split">
         <div className="panel">
-          <div className="row" style={{ marginBottom: 10 }}>
-            <div className="seg">
-              <button
-                className={`segBtn ${view === 'wireframe' ? 'active' : ''}`}
-                onClick={() => setView('wireframe')}
-                disabled={!tree}
-              >
-                线框图
-              </button>
-              <button
-                className={`segBtn ${view === 'tree' ? 'active' : ''}`}
-                onClick={() => setView('tree')}
-                disabled={!tree}
-              >
-                树
-              </button>
-            </div>
-
-            {view === 'tree' ? (
+          {view === 'tree' ? (
+            <div className="row" style={{ marginBottom: 10 }}>
               <input
                 className="input"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="搜索 name / id"
               />
-            ) : (
-              <div className="hint" style={{ marginLeft: 'auto' }}>
-                点击线框区域选择
-              </div>
-            )}
-          </div>
+            </div>
+          ) : null}
 
           {view === 'wireframe' ? (
             <div className="wireframe">
@@ -389,6 +384,14 @@ function App() {
             <button className="btn" disabled={!tree || !selectedId} onClick={exportSelectedDescendants}>
               导出 descendants
             </button>
+            <label className="chk">
+              <input
+                type="checkbox"
+                checked={compactExport}
+                onChange={(e) => setCompactExport(e.target.checked)}
+              />
+              过滤空字段
+            </label>
             <button className="btn" disabled={!exportText} onClick={copyExport}>
               复制 JSON
             </button>
@@ -469,6 +472,112 @@ function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
+function IconButton(props: {
+  title: string;
+  ariaLabel: string;
+  disabled?: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  const { title, ariaLabel, disabled, onClick, children } = props;
+  return (
+    <button
+      type="button"
+      className="iconBtn"
+      title={title}
+      aria-label={ariaLabel}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  );
+}
+
+function IconDownload() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+      <path
+        d="M12 3v10"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M8 11l4 4 4-4"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M4 21h16"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function IconRefresh() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+      <path
+        d="M21 12a9 9 0 1 1-3-6.7"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M21 3v6h-6"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function IconTrash() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+      <path
+        d="M3 6h18"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M8 6V4h8v2"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M19 6l-1 14H6L5 6"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M10 11v6M14 11v6"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function WireframeView(props: {
   tree: LanhuTree;
   rectIndex: Array<{ id: string; rect: LanhuRect; area: number }>;
@@ -477,21 +586,22 @@ function WireframeView(props: {
   onSelect: (id: string) => void;
 }) {
   const { tree, rectIndex, viewBox, selectedId, onSelect } = props;
+  const lastPickRef = useRef<{ sig: string } | null>(null);
 
   const layersToDraw = useMemo(() => {
     const max = 4000;
     return rectIndex.slice(0, max);
   }, [rectIndex]);
 
-  function pickIdAtPoint(x: number, y: number): string | null {
-    // rectIndex 已按面积从小到大排序，第一次命中就是最“贴合”的节点
+  function pickCandidatesAtPoint(x: number, y: number): string[] {
+    const candidates: string[] = [];
     for (const item of rectIndex) {
       const r = item.rect;
       if (x >= r.left && x <= r.left + r.width && y >= r.top && y <= r.top + r.height) {
-        return item.id;
+        candidates.push(item.id);
       }
     }
-    return null;
+    return candidates;
   }
 
   function onClickSvg(e: React.MouseEvent<SVGSVGElement>) {
@@ -501,8 +611,21 @@ function WireframeView(props: {
     const ry = (e.clientY - rect.top) / rect.height;
     const x = viewBox.x + rx * viewBox.width;
     const y = viewBox.y + ry * viewBox.height;
-    const id = pickIdAtPoint(x, y);
-    if (id) onSelect(id);
+    const candidateIds = pickCandidatesAtPoint(x, y);
+    if (!candidateIds.length) return;
+
+    const sig = candidateIds.join('|');
+    let nextId = candidateIds[0];
+
+    // 同一区域重复点击：从小到大“扩选”（选更大的框），直到最大的候选
+    if (lastPickRef.current?.sig === sig && selectedId) {
+      const idx = candidateIds.indexOf(selectedId);
+      if (idx >= 0 && idx < candidateIds.length - 1) nextId = candidateIds[idx + 1];
+      else if (idx >= 0) nextId = candidateIds[idx];
+    }
+
+    lastPickRef.current = { sig };
+    onSelect(nextId);
   }
 
   const selectedRect = selectedId ? getNodeRect(tree.nodesById[selectedId]) : null;
