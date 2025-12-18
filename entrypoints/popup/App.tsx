@@ -34,6 +34,7 @@ function App() {
   const [exportText, setExportText] = useState('');
   const [view, setView] = useState<'tree' | 'wireframe'>('tree');
   const [compactExport, setCompactExport] = useState(true);
+  const [hiddenById, setHiddenById] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     let canceled = false;
@@ -73,7 +74,7 @@ function App() {
     })();
   }, [pageUrl]);
 
-  const rectIndex = useMemo(() => {
+  const rectIndexAll = useMemo(() => {
     if (!tree) return null;
     const items: Array<{ id: string; rect: LanhuRect; area: number }> = [];
     for (const [id, node] of Object.entries(tree.nodesById)) {
@@ -87,14 +88,20 @@ function App() {
     return items;
   }, [tree]);
 
+  const rectIndexVisible = useMemo(() => {
+    if (!rectIndexAll) return null;
+    if (!Object.keys(hiddenById).length) return rectIndexAll;
+    return rectIndexAll.filter((x) => !hiddenById[x.id]);
+  }, [rectIndexAll, hiddenById]);
+
   const wireframeViewBox = useMemo(() => {
-    if (!tree || !rectIndex) return null;
+    if (!tree || !rectIndexVisible) return null;
     const rootId = tree.rootIds[0];
     if (!rootId) return null;
     const root = tree.nodesById[rootId];
     const rootRect = root ? getNodeRect(root) : null;
 
-    const sample = rectIndex.filter((x) => x.id !== rootId).slice(0, 120);
+    const sample = rectIndexVisible.filter((x) => x.id !== rootId).slice(0, 120);
     if (rootRect && sample.length) {
       const inBounds = sample.filter((x) => {
         const r = x.rect;
@@ -115,7 +122,7 @@ function App() {
     let minTop = Number.POSITIVE_INFINITY;
     let maxRight = Number.NEGATIVE_INFINITY;
     let maxBottom = Number.NEGATIVE_INFINITY;
-    for (const x of rectIndex) {
+    for (const x of rectIndexVisible) {
       minLeft = Math.min(minLeft, x.rect.left);
       minTop = Math.min(minTop, x.rect.top);
       maxRight = Math.max(maxRight, x.rect.left + x.rect.width);
@@ -125,7 +132,7 @@ function App() {
       return null;
     }
     return { x: minLeft, y: minTop, width: maxRight - minLeft, height: maxBottom - minTop };
-  }, [tree, rectIndex]);
+  }, [tree, rectIndexVisible]);
 
   const visibleIds = useMemo(() => {
     if (!tree) return null;
@@ -188,6 +195,7 @@ function App() {
     setSelectedId(defaultRoot);
     setExpanded(Object.fromEntries(nextTree.rootIds.map((id) => [id, true])));
     setView('wireframe');
+    setHiddenById({});
   }
 
   function toggleExpanded(id: string) {
@@ -210,6 +218,54 @@ function App() {
     setExportText(JSON.stringify(out, null, 2));
   }
 
+  function exportVisuallyContained() {
+    if (!tree || !selectedId || !rectIndexAll) return;
+    const containerRect = getNodeRect(tree.nodesById[selectedId]);
+    if (!containerRect) return;
+
+    const included = new Set<string>();
+    for (const { id, rect } of rectIndexAll) {
+      if (isRectInside(rect, containerRect)) included.add(id);
+    }
+    included.add(selectedId);
+
+    const ids = getTreePreorderIds(tree, included);
+    const nodes = ids.map((id) => pickExportNode(tree.nodesById[id]));
+    const parentById: Record<string, string | null> = {};
+    for (const id of ids) parentById[id] = tree.parentById[id] ?? null;
+
+    const payload = {
+      selectedId,
+      count: nodes.length,
+      parentById,
+      nodes,
+    };
+    const out = compactExport ? (compactJson(payload) ?? payload) : payload;
+    setExportText(JSON.stringify(out, null, 2));
+  }
+
+  function hideSelectedInWireframe() {
+    if (!selectedId) return;
+    setHiddenById((prev) => {
+      if (prev[selectedId]) return prev;
+      return { ...prev, [selectedId]: true };
+    });
+  }
+
+  function unhideSelectedInWireframe() {
+    if (!selectedId) return;
+    setHiddenById((prev) => {
+      if (!prev[selectedId]) return prev;
+      const next = { ...prev };
+      delete next[selectedId];
+      return next;
+    });
+  }
+
+  function unhideAllInWireframe() {
+    setHiddenById({});
+  }
+
   async function copyExport() {
     if (!exportText) return;
     try {
@@ -225,6 +281,7 @@ function App() {
     selectedId && tree ? (tree.childrenById[selectedId]?.length ?? 0) : 0;
   const selectedDescCount =
     selectedId && tree ? getDescendantIds(tree, selectedId, false).length : 0;
+  const hiddenCount = useMemo(() => Object.keys(hiddenById).length, [hiddenById]);
 
   const headerHint = useMemo(() => {
     if (!raw) return '';
@@ -317,10 +374,10 @@ function App() {
 
           {view === 'wireframe' ? (
             <div className="wireframe">
-              {tree && rectIndex && wireframeViewBox ? (
+              {tree && rectIndexVisible && wireframeViewBox ? (
                 <WireframeView
                   tree={tree}
-                  rectIndex={rectIndex}
+                  rectIndex={rectIndexVisible}
                   viewBox={wireframeViewBox}
                   selectedId={selectedId}
                   onSelect={setSelectedId}
@@ -384,6 +441,14 @@ function App() {
             <button className="btn" disabled={!tree || !selectedId} onClick={exportSelectedDescendants}>
               导出 descendants
             </button>
+            <button
+              className="btn"
+              disabled={!tree || !selectedId || !rectIndexAll}
+              onClick={exportVisuallyContained}
+              title="导出选中框内所有节点（按 frame/realFrame/combinedFrame 的几何包含判断）"
+            >
+              导出 包含
+            </button>
             <label className="chk">
               <input
                 type="checkbox"
@@ -392,6 +457,32 @@ function App() {
               />
               过滤空字段
             </label>
+          </div>
+
+          <div className="row">
+            <button
+              className="btn"
+              disabled={!selectedId || view !== 'wireframe' || !!hiddenById[selectedId]}
+              onClick={hideSelectedInWireframe}
+              title="仅影响线框图显示/点选，不影响树视图与导出"
+            >
+              隐藏选中
+            </button>
+            <button
+              className="btn"
+              disabled={!selectedId || view !== 'wireframe' || !hiddenById[selectedId]}
+              onClick={unhideSelectedInWireframe}
+            >
+              取消隐藏
+            </button>
+            <button
+              className="btn"
+              disabled={view !== 'wireframe' || !hiddenCount}
+              onClick={unhideAllInWireframe}
+              title={hiddenCount ? `已隐藏 ${hiddenCount} 个` : undefined}
+            >
+              恢复全部
+            </button>
             <button className="btn" disabled={!exportText} onClick={copyExport}>
               复制 JSON
             </button>
@@ -405,6 +496,50 @@ function App() {
 }
 
 export default App;
+
+function isRectInside(inner: LanhuRect, outer: LanhuRect): boolean {
+  const eps = 0.01;
+  const innerRight = inner.left + inner.width;
+  const innerBottom = inner.top + inner.height;
+  const outerRight = outer.left + outer.width;
+  const outerBottom = outer.top + outer.height;
+  return (
+    inner.left >= outer.left - eps &&
+    inner.top >= outer.top - eps &&
+    innerRight <= outerRight + eps &&
+    innerBottom <= outerBottom + eps
+  );
+}
+
+function getTreePreorderIds(tree: LanhuTree, included: Set<string>): string[] {
+  const result: string[] = [];
+  const stack: Array<{ id: string; idx: number }> = [];
+
+  for (let i = tree.rootIds.length - 1; i >= 0; i--) {
+    const rootId = tree.rootIds[i];
+    stack.push({ id: rootId, idx: -1 });
+  }
+
+  while (stack.length) {
+    const top = stack[stack.length - 1]!;
+    if (top.idx === -1) {
+      top.idx = 0;
+      if (included.has(top.id)) result.push(top.id);
+    }
+
+    const children = tree.childrenById[top.id] ?? [];
+    if (top.idx >= children.length) {
+      stack.pop();
+      continue;
+    }
+
+    const childId = children[top.idx]!;
+    top.idx++;
+    stack.push({ id: childId, idx: -1 });
+  }
+
+  return result;
+}
 
 function TreeNode(props: {
   id: string;

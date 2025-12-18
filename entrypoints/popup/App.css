@@ -187,6 +187,7 @@
   min-height: 380px;
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
 .wireframe {
