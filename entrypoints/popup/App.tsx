@@ -101,21 +101,13 @@ function App() {
     const root = tree.nodesById[rootId];
     const rootRect = root ? getNodeRect(root) : null;
 
-    const sample = rectIndexVisible.filter((x) => x.id !== rootId).slice(0, 120);
-    if (rootRect && sample.length) {
-      const inBounds = sample.filter((x) => {
-        const r = x.rect;
-        return (
-          r.left >= 0 &&
-          r.top >= 0 &&
-          r.left + r.width <= rootRect.width * 1.1 &&
-          r.top + r.height <= rootRect.height * 1.1
-        );
-      }).length;
-      if (inBounds / sample.length >= 0.6) {
+    // 统一使用画板宽高，但坐标从 (0, 0) 开始；
+    // 画板本身在 SketchJSON 里通常是全局坐标（left 很大），
+    // 子节点是相对坐标（0 ~ width），这里直接用相对坐标系渲染。
+    if (rootRect && Number.isFinite(rootRect.width) && Number.isFinite(rootRect.height)) {
+      if (rootRect.width > 0 && rootRect.height > 0) {
         return { x: 0, y: 0, width: rootRect.width, height: rootRect.height };
       }
-      return { x: rootRect.left, y: rootRect.top, width: rootRect.width, height: rootRect.height };
     }
 
     let minLeft = Number.POSITIVE_INFINITY;
